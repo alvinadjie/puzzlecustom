@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#4f46e5">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Puzzle">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Puzzle Gambar</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#1e1b4b;color:#fff;font-family:system-ui,sans-serif}
+body{display:flex;justify-content:center;align-items:center;padding:env(safe-area-inset-top) 12px env(safe-area-inset-bottom);overscroll-behavior:none}
+.screen{display:none;width:100%;max-width:480px;flex-direction:column;align-items:center;gap:14px}
+.screen.active{display:flex}
+h1{margin:0;font-size:1.6rem}
+button{font:inherit;border:0;border-radius:12px;padding:12px 22px;background:#4f46e5;color:#fff;font-weight:600;cursor:pointer}
+button.sec{background:#312e81}
+button:disabled{opacity:.4}
+button.on{background:#fbbf24;color:#1e1b4b}
+.preview{width:100%;aspect-ratio:1;border-radius:14px;background:#312e81 center/cover;display:flex;align-items:center;justify-content:center;color:#a5b4fc;text-align:center;padding:10px;cursor:pointer}
+.lbl{font-size:.9rem;color:#a5b4fc}
+.sizes{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+.sizes button{background:#312e81;padding:10px 16px;min-width:52px}
+.sizes button.on{background:#fbbf24;color:#1e1b4b}
+.hud{display:flex;justify-content:space-between;width:100%;font-size:1.05rem;font-variant-numeric:tabular-nums;align-items:center}
+#area{position:relative;touch-action:none;user-select:none;-webkit-user-select:none}
+#area .guide{position:absolute;background:#ffffff0a;border:2px dashed #6366f1;border-radius:4px;pointer-events:none}
+.piece{position:absolute;left:0;top:0;pointer-events:none;z-index:10;filter:drop-shadow(0 2px 3px #0009)}
+.piece.lift{filter:drop-shadow(0 8px 10px #000b)}
+.piece.locked{z-index:1;filter:none}
+#win{position:fixed;inset:0;background:#000b;display:none;align-items:center;justify-content:center;z-index:100}
+#win.show{display:flex}
+.card{background:#312e81;border-radius:18px;padding:28px;text-align:center;display:flex;flex-direction:column;gap:10px;min-width:260px}
+.card h2{margin:0}
+.row{display:flex;gap:10px;justify-content:center;margin-top:8px}
+</style>
+</head>
+<body>
+
+<div class="screen active" id="setup">
+  <h1>🧩 Puzzle Gambar</h1>
+  <div class="preview" id="preview">Ketuk untuk upload gambar</div>
+  <input type="file" id="file" accept="image/*" hidden>
+  <div class="lbl">Jumlah potongan</div>
+  <div class="sizes" id="sizes"></div>
+  <button id="start" disabled>Mulai</button>
+</div>
+
+<div class="screen" id="game">
+  <div class="hud">
+    <span>⏱ <b id="time">00:00</b></span>
+    <span>🧩 <b id="placed">0</b>/<b id="total">0</b></span>
+    <span><button class="sec" id="peek" style="padding:6px 12px">👁</button> <button class="sec" id="mute" style="padding:6px 12px">🔊</button></span>
+  </div>
+  <div id="area"></div>
+  <button class="sec" id="back">Ganti Gambar</button>
+</div>
+
+<div id="win"><div class="card">
+  <h2>🎉 Selesai!</h2>
+  <div>Waktu: <b id="wTime"></b></div>
+  <div>Potongan: <b id="wCount"></b></div>
+  <div class="row"><button id="again">Main Lagi</button><button class="sec" id="change">Ganti Gambar</button></div>
+</div></div>
+
+<script>
+const $ = id => document.getElementById(id);
+// [sisi kecil, sisi besar] grid untuk tiap jumlah potongan
+const DIMS = {4:[2,2], 6:[2,3], 9:[3,3], 12:[3,4], 16:[4,4], 24:[4,6]};
+let count = 6, srcImg = null, pieces = [], placed = 0, total = 0;
+let t0 = 0, timer = null, playing = false, muted = false, preview = false;
+let G = {}; // layout aktif
+const hit = document.createElement('canvas').getContext('2d');
+
+// ---------- Suara & getar ----------
+let ac;
+function tone(f, d, type='sine', when=0, vol=.15){
+  if(muted || !ac) return;
+  const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime + when;
+  o.type = type; o.frequency.value = f;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(.001, t + d);
+  o.connect(g).connect(ac.destination); o.start(t); o.stop(t + d);
+}
+const sfx = {
+  pick: () => tone(440, .06),
+  drop: () => { tone(220, .09, 'triangle'); tone(330, .09, 'triangle', .05); },
+  snap: () => { tone(660, .08, 'square', 0, .08); tone(880, .12, 'square', .07, .08); },
+  win:  () => [523,659,784,1047].forEach((f,i)=>tone(f,.25,'square',i*.13,.1))
+};
+const vib = p => { if(!muted && navigator.vibrate) navigator.vibrate(p); };
+
+// ---------- Setup ----------
+const sizesEl = $('sizes');
+Object.keys(DIMS).forEach(n=>{
+  n = +n; const b = document.createElement('button');
+  b.textContent = n;
+  b.onclick = ()=>{count=n; [...sizesEl.children].forEach(c=>c.classList.remove('on')); b.classList.add('on');};
+  if(n===count) b.classList.add('on'); sizesEl.appendChild(b);
+});
+$('preview').onclick = ()=>$('file').click();
+$('file').onchange = e=>{
+  const f = e.target.files[0]; if(!f) return;
+  const img = new Image();
+  img.onload = ()=>{
+    srcImg = img;
+    $('preview').style.backgroundImage = `url(${img.src})`; $('preview').textContent = '';
+    $('start').disabled = false;
+  };
+  img.src = URL.createObjectURL(f);
+};
+function show(id){ document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('active', s.id===id)); }
+
+// ---------- Bentuk puzzle ----------
+function edgePath(p, ax, ay, bx, by, nx, ny, s){
+  if(!s){ p.lineTo(bx, by); return; }
+  const dx = bx-ax, dy = by-ay, L = Math.hypot(dx, dy), t = .1;
+  const P = (l,w)=>[ax+dx*l+nx*w*L*s, ay+dy*l+ny*w*L*s];
+  const pts = [[.2,0],[.5,-t],[.5-t,t],[.5-2*t,3*t],[.5+2*t,3*t],[.5+t,t],[.5,-t],[.8,0],[1,0]];
+  for(let i=0;i<9;i+=3){
+    const a=P(...pts[i]), b=P(...pts[i+1]), c=P(...pts[i+2]);
+    p.bezierCurveTo(a[0],a[1],b[0],b[1],c[0],c[1]);
+  }
+}
+function buildPath(e, S, M){
+  const p = new Path2D(), x0=M, y0=M, x1=M+S, y1=M+S;
+  p.moveTo(x0,y0);
+  edgePath(p,x0,y0,x1,y0, 0,-1, e.t);
+  edgePath(p,x1,y0,x1,y1, 1, 0, e.r);
+  edgePath(p,x1,y1,x0,y1, 0, 1, e.b);
+  edgePath(p,x0,y1,x0,y0,-1, 0, e.l);
+  p.closePath(); return p;
+}
+
+// ---------- Game ----------
+function startGame(){
+  ac = ac || new (window.AudioContext||window.webkitAudioContext)();
+  if(ac.state==='suspended') ac.resume();
+
+  const [a,b] = DIMS[count], land = srcImg.width >= srcImg.height;
+  const rows = land ? a : b, cols = land ? b : a, asp = cols/rows;
+  const k = Math.min(window.devicePixelRatio||1, 2.5);
+  const availW = Math.min(innerWidth-24, 480), availH = Math.max(innerHeight-170, 340);
+  const BW = Math.min(availW, availH/(1+1.6/rows)*asp), BH = BW/asp;
+  const pw = BW/cols, m = Math.ceil(pw*.27), S = pw+2*m;
+  const areaH = Math.max(availH, BH+S+8), bx = (availW-BW)/2;
+  G = {rows, cols, k, pw, m, S, BH, bx, availW, areaH};
+
+  const area = $('area'); area.innerHTML = '';
+  area.style.width = availW+'px'; area.style.height = areaH+'px';
+
+  // gambar sumber (dipotong tengah sesuai grid)
+  const sc = document.createElement('canvas');
+  sc.width = Math.round(BW*k); sc.height = Math.round(BH*k);
+  const ia = srcImg.width/srcImg.height; let sw, sh;
+  if(ia > asp){ sh = srcImg.height; sw = sh*asp; } else { sw = srcImg.width; sh = sw/asp; }
+  sc.getContext('2d').drawImage(srcImg,(srcImg.width-sw)/2,(srcImg.height-sh)/2,sw,sh,0,0,sc.width,sc.height);
+  const frame = document.createElement('div'); frame.className = 'guide';
+  frame.style.cssText = `left:${bx}px;top:0;width:${BW}px;height:${BH}px`;
+  sc.style.cssText = `position:absolute;inset:0;width:100%;height:100%;opacity:.3;display:${preview?'block':'none'}`;
+  frame.appendChild(sc); G.pv = sc;
+  area.appendChild(frame);
+
+  // sisi saling mengunci (+1 = tonjolan ke bawah/kanan)
+  const rnd = ()=>Math.random()<.5?1:-1;
+  const hor = Array.from({length:rows+1},()=>Array.from({length:cols},rnd));
+  const ver = Array.from({length:rows},()=>Array.from({length:cols+1},rnd));
+
+  pieces = [];
+  const PWk = pw*k, Mk = m*k, size = Math.round(S*k);
+  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+    const e = {
+      t: r===0 ? 0 : -hor[r][c],  b: r===rows-1 ? 0 : hor[r+1][c],
+      l: c===0 ? 0 : -ver[r][c],  r: c===cols-1 ? 0 : ver[r][c+1]
+    };
+    const path = buildPath(e, PWk, Mk);
+    const cv = document.createElement('canvas'); cv.width = cv.height = size;
+    cv.className = 'piece'; cv.style.width = cv.style.height = S+'px';
+    const g = cv.getContext('2d');
+    g.save(); g.clip(path); g.drawImage(sc, Mk-c*PWk, Mk-r*PWk);
+    g.lineWidth = k*3; g.strokeStyle = 'rgba(255,255,255,.18)'; g.stroke(path); g.restore();
+    g.lineWidth = k*1.2; g.strokeStyle = 'rgba(0,0,0,.5)'; g.stroke(path);
+    const p = {cv, path, r, c, tx: bx+c*pw-m, ty: r*pw-m, locked:false, z:10};
+    p.x = Math.random()*(availW-S);
+    p.y = BH+4 + Math.random()*Math.max(0, areaH-S-BH-4);
+    place(p); area.appendChild(cv); pieces.push(p);
+  }
+  placed = 0; total = pieces.length;
+  $('placed').textContent = 0; $('total').textContent = total; $('time').textContent = '00:00';
+  $('peek').classList.toggle('on', preview);
+  show('game'); $('win').classList.remove('show');
+  playing = true; t0 = Date.now(); clearInterval(timer);
+  timer = setInterval(()=>$('time').textContent = fmt(Date.now()-t0), 250);
+}
+const place = p => p.cv.style.transform = `translate(${p.x}px,${p.y}px)`;
+const fmt = ms => { const s = ms/1000|0; return String(s/60|0).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); };
+
+function finish(){
+  playing = false; clearInterval(timer);
+  const t = Date.now()-t0; $('time').textContent = fmt(t);
+  $('wTime').textContent = fmt(t); $('wCount').textContent = total;
+  sfx.win(); vib([100,60,100,60,250]);
+  setTimeout(()=>$('win').classList.add('show'), 500);
+}
+
+// ---------- Drag & drop ----------
+let drag = null, zTop = 10;
+const area = $('area');
+const pos = e => { const r = area.getBoundingClientRect(); return [e.clientX-r.left, e.clientY-r.top]; };
+
+area.addEventListener('pointerdown', e=>{
+  if(!playing) return;
+  const [px,py] = pos(e), {S,k} = G;
+  const cand = pieces.filter(p=>!p.locked).sort((a,b)=>b.z-a.z);
+  for(const p of cand){
+    const lx = px-p.x, ly = py-p.y;
+    if(lx<0||ly<0||lx>S||ly>S) continue;
+    if(!hit.isPointInPath(p.path, lx*k, ly*k)) continue;
+    e.preventDefault();
+    drag = {p, ox:lx, oy:ly};
+    p.z = ++zTop; p.cv.style.zIndex = p.z; p.cv.style.transition = 'none';
+    p.cv.classList.add('lift'); area.setPointerCapture(e.pointerId);
+    sfx.pick(); vib(10); return;
+  }
+});
+area.addEventListener('pointermove', e=>{
+  if(!drag) return;
+  const [px,py] = pos(e), {p,ox,oy} = drag, {S,m,availW,areaH} = G;
+  p.x = Math.max(-m, Math.min(availW-S+m, px-ox));
+  p.y = Math.max(-m, Math.min(areaH-S+m, py-oy));
+  place(p);
+});
+function endDrag(){
+  if(!drag) return;
+  const {p} = drag; drag = null; p.cv.classList.remove('lift');
+  if(Math.hypot(p.x-p.tx, p.y-p.ty) < G.pw*.35){
+    p.x = p.tx; p.y = p.ty; p.locked = true;
+    p.cv.style.transition = 'transform .12s'; p.cv.style.zIndex = '';
+    p.cv.classList.add('locked'); place(p);
+    placed++; $('placed').textContent = placed;
+    sfx.snap(); vib([25,30,25]);
+    if(placed === total) finish();
+  } else { sfx.drop(); vib(40); }
+}
+area.addEventListener('pointerup', endDrag);
+area.addEventListener('pointercancel', endDrag);
+
+// ---------- Tombol ----------
+$('start').onclick = startGame;
+$('again').onclick = startGame;
+const toSetup = ()=>{ playing=false; clearInterval(timer); $('win').classList.remove('show'); show('setup'); };
+$('back').onclick = toSetup; $('change').onclick = toSetup;
+$('peek').onclick = ()=>{ preview=!preview; $('peek').classList.toggle('on',preview); if(G.pv) G.pv.style.display = preview?'block':'none'; };
+$('mute').onclick = ()=>{ muted=!muted; $('mute').textContent = muted?'🔇':'🔊'; };
+
+if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>
